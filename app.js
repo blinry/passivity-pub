@@ -1,23 +1,28 @@
-const https = require("https")
-const crypto = require("crypto")
-const fs = require("fs")
 const express = require("express")
-const httpSignature = require("http-signature")
+const helpers = require("./helpers.js")
+const uuid = require("uuid")
+const fs = require("fs")
+const {v4: uuidv4} = require("uuid")
+
+const domain = "pp.blinry.org"
+const user = "blinry"
+
+let state = require("./state.json")
+let publicKey = fs.readFileSync("./public.pem", "ascii")
+
 const app = express()
 const port = 7800
 
-const domain = "pp.blinry.org"
-let state = require("./state.json")
-
 function writeState() {
-    require("fs").writeFileSync("./state.json", JSON.stringify(state))
+    require("fs").writeFileSync("./state.json", JSON.stringify(state, null, 4))
 }
 
 app.use(express.json({type: "*/*"}))
+app.use(express.static("public"))
 
 app.get("/.well-known/webfinger", (req, res) => {
     res.json({
-        subject: "acct:blinry@pp.blinry.org",
+        subject: `acct:${user}@${domain}`,
         links: [
             {
                 rel: "self",
@@ -36,143 +41,147 @@ app.get("/actor", (req, res) => {
         ],
         id: `https://${domain}/actor`,
         type: "Person",
-        preferredUsername: "blinry",
+        preferredUsername: user,
         inbox: `https://${domain}/inbox`,
+        outbox: `https://${domain}/outbox`,
         followers: `https://${domain}/followers`,
         summary: "Test account on PassivityPub",
+        icon: {
+            type: "Image",
+            mediaType: "image/png",
+            url: `https://${domain}/icon.png`,
+        },
         publicKey: {
             id: `https://${domain}/actor#main-key`,
             owner: `https://${domain}/actor`,
-            publicKeyPem:
-                "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAv47OZbT1+wkXV5Q7JY21\nUeeg02Bg/+e7bVBvMVxls6ywaqz8XMPJi7qiOqVheqRpDarHel8hqLX/gc9yBjo4\nr5Da1gNP6CtF9vkiswZTKpR+t8g1X+BWPMknMTNPXIV+4ufj1zutbvJTiBBhFA5g\nfZ+3sDTNCKqW2hpwWvNL6sMEFl510UhTqHsQbMlAXUMtteQ1vL2rWYHk+DgmiP69\nx/Nm11jrIl0gHgV/zY+ajkUC8D2FZXI58J47o8q3RaIlxL2RPaO1RwPRnsBBWpkf\noRBfLRSZNDJEaels0SPKrbq2cvVa1tEjQ5iSYyNPJ7ZZSx22BDh95GmtULUymAVv\n6wIDAQAB\n-----END PUBLIC KEY-----",
+            publicKeyPem: publicKey,
         },
     })
 })
 
 app.get("/followers", (req, res) => {
-    handleCollectionRequest(req, res, state.following)
+    handleCollectionRequest(req, res, state.following, "following")
 })
 
-function handleCollectionRequest(req, res, collection) {
-    if (req.query.page) {
-        let page = parseInt(req.query.page)
-        let start = (page - 1) * 10
-        let end = start + 10
-        let items = collection.slice(start, end)
-        res.json({
-            "@context": "https://www.w3.org/ns/activitystreams",
-            id: `https://${domain}/followers?page=${page}`,
-            type: "OrderedCollectionPage",
-            totalItems: collection.length,
-            partOf: `https://${domain}/followers`,
-            orderedItems: items,
-        })
+app.get("/outbox", (req, res) => {
+    handleCollectionRequest(req, res, state.outbox, "outbox")
+})
+
+app.get("/object/:id", (req, res) => {
+    console.log(req.params.id)
+    let object = state.objects[req.params.id]
+    console.log(state.objects)
+    console.log(object)
+    if (object) {
+        res.setHeader("Content-Type", "application/activity+json")
+        res.json(object)
     } else {
-        res.json({
-            "@context": "https://www.w3.org/ns/activitystreams",
-            id: `https://${domain}/followers`,
-            type: "OrderedCollection",
-            totalItems: collection.length,
-            first: `https://${domain}/followers?page=1`,
-        })
+        res.status(404).end()
     }
-}
+})
 
 app.post("/inbox", async (req, res) => {
     let thing = req.body
     console.log(thing)
-    // headers
-    console.log(req.headers)
     if (thing.type === "Follow") {
         let inbox = await findInbox(thing.actor)
-        sendSigned(inbox, {
+        helpers.sendSigned(inbox, domain, {
             "@context": "https://www.w3.org/ns/activitystreams",
             id: `https://${domain}/accept/${thing.id}`,
             type: "Accept",
             actor: `https://${domain}/actor`,
             object: thing,
         })
-        state.following.push(thing.actor)
+        if (!state.following) {
+            state.following = []
+        }
+        if (!state.following.includes(thing.actor)) {
+            state.following.push(thing.actor)
+        }
         writeState()
     }
     res.end()
 })
 
+app.listen(port, () => {
+    console.log(`Listening on port ${port}`)
+    //createNote("<p>Hello world! :3</p>")
+})
+
+function createNote(text) {
+    let note = {
+        "@context": "https://www.w3.org/ns/activitystreams",
+        id: newId(),
+        type: "Note",
+        attributedTo: `https://${domain}/actor`,
+        published: new Date().toISOString(),
+        content: text,
+        to: "https://www.w3.org/ns/activitystreams#Public",
+    }
+    let create = {
+        "@context": "https://www.w3.org/ns/activitystreams",
+        id: newId(),
+        type: "Create",
+        actor: `https://${domain}/actor`,
+        object: note,
+    }
+    addObject(note)
+    addObject(create)
+    addToOutbox(create)
+}
+
 async function findInbox(actor) {
-    // Make GET request to actor
-    let json = await fetchJSON(actor)
+    let json = await helpers.fetchJSON(actor)
     return json.inbox
 }
 
-function sendSigned(url, payload) {
-    console.log(url)
-    let domain2 = url.split("/")[2]
-    let path = url.split(domain2)[1]
-    let options = {
-        host: domain2,
-        port: 443,
-        method: "POST",
-        path: path,
-        headers: {},
+function handleCollectionRequest(req, res, collection, name) {
+    let response = {
+        "@context": "https://www.w3.org/ns/activitystreams",
+        totalItems: collection.length,
     }
-    let req = https.request(options, (res) => {
-        console.log(res.statusCode)
-        res.on("data", (d) => {
-            process.stdout.write(d)
-        })
-    })
-    console.log(req.getHeaders())
-    let date = new Date().toUTCString()
-    let digest =
-        "SHA-256=" +
-        crypto
-            .createHash("sha256")
-            .update(JSON.stringify(payload))
-            .digest("base64")
 
-    let signedString = `(request-target): post ${path}\nhost: ${domain2}\ndate: ${date}\ndigest: ${digest}`
-    console.log(signedString)
-    let key = require("fs").readFileSync("./private.pem", "ascii")
-    // RSA signature
-    //let signature = crypto.sign("sha256", Buffer.from(signedString), {
-    //    key: key,
-    //    padding: crypto.constants.RSA_PKCS1_PADDING,
-    //})
-    let signer = crypto.createSign("RSA-SHA256")
-    signer.update(signedString)
-    signer.end()
-    let signature = signer.sign(key)
-    let signatureBase64 = signature.toString("base64")
-    let header = `keyId="https://${domain}/actor#main-key",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="${signatureBase64}"`
-    req.setHeader("Date", date)
-    req.setHeader("Digest", digest)
-    req.setHeader("Signature", header)
-    req.write(JSON.stringify(payload))
-    console.log(req.getHeaders())
-    req.end()
+    if (req.query.page) {
+        let page = parseInt(req.query.page)
+        let start = (page - 1) * 10
+        let end = start + 10
+        let items = collection.slice(start, end)
+        response.id = `https://${domain}/${name}?page=${page}`
+        response.type = "OrderedCollectionPage"
+        response.partOf = `https://${domain}/${name}`
+        if (page > 1) {
+            response.prev = `https://${domain}/${name}?page=${page - 1}`
+        }
+        if (end < collection.length) {
+            response.next = `https://${domain}/${name}?page=${page + 1}`
+        }
+        response.orderedItems = items
+    } else {
+        response.id = `https://${domain}/${name}`
+        response.type = "OrderedCollection"
+        response.first = `https://${domain}/${name}?page=1`
+    }
+    res.json(response)
 }
 
-app.listen(port, () => {
-    console.log(`Listening on port ${port}`)
-    //sendSigned(`https://${domain}/inbox`, {type: "Hello"})
-})
+function addObject(object) {
+    if (!state.objects) {
+        state.objects = {}
+    }
+    const id = object.id.split("/").pop()
+    state.objects[id] = object
+    writeState()
+}
 
-// Wat. Via https://stackoverflow.com/questions/65306617/async-await-for-node-js-https-get
-async function fetchJSON(url) {
-    return new Promise((resolve) => {
-        let data = ""
-        // Set content type to application/activity+json
-        https.get(
-            url,
-            {headers: {Accept: "application/activity+json"}},
-            (res) => {
-                res.on("data", (d) => {
-                    data += d
-                })
-                res.on("end", () => {
-                    resolve(JSON.parse(data))
-                })
-            }
-        )
-    })
+function addToOutbox(object) {
+    if (!state.outbox) {
+        state.outbox = []
+    }
+    state.outbox.push(object)
+    console.log(object)
+    writeState()
+}
+
+function newId() {
+    return `https://${domain}/object/${uuidv4()}`
 }
