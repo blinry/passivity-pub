@@ -7,7 +7,11 @@ const {v4: uuidv4} = require("uuid")
 const domain = "pp.blinry.org"
 const user = "blinry"
 
+if (!fs.existsSync("./state.json")) {
+    fs.writeFileSync("./state.json", "{}")
+}
 let state = require("./state.json")
+
 let publicKey = fs.readFileSync("./public.pem", "ascii")
 
 const app = express()
