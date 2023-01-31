@@ -1,4 +1,5 @@
 const https = require("https")
+const crypto = require("crypto")
 const fs = require("fs")
 const express = require("express")
 const httpSignature = require("http-signature")
@@ -80,6 +81,8 @@ function handleCollectionRequest(req, res, collection) {
 app.post("/inbox", async (req, res) => {
     let thing = req.body
     console.log(thing)
+    // headers
+    console.log(req.headers)
     if (thing.type === "Follow") {
         let inbox = await findInbox(thing.actor)
         sendSigned(inbox, {
@@ -103,7 +106,6 @@ async function findInbox(actor) {
 
 function sendSigned(url, payload) {
     console.log(url)
-    let key = require("fs").readFileSync("./private.pem", "ascii")
     let domain2 = url.split("/")[2]
     let path = url.split(domain2)[1]
     let options = {
@@ -119,17 +121,40 @@ function sendSigned(url, payload) {
             process.stdout.write(d)
         })
     })
-    httpSignature.sign(req, {
-        key: key,
-        keyId: `https://${domain}/actor`,
-    })
+    console.log(req.getHeaders())
+    let date = new Date().toUTCString()
+    let digest =
+        "SHA-256=" +
+        crypto
+            .createHash("sha256")
+            .update(JSON.stringify(payload))
+            .digest("base64")
+
+    let signedString = `(request-target): post ${path}\nhost: ${domain2}\ndate: ${date}\ndigest: ${digest}`
+    console.log(signedString)
+    let key = require("fs").readFileSync("./private.pem", "ascii")
+    // RSA signature
+    //let signature = crypto.sign("sha256", Buffer.from(signedString), {
+    //    key: key,
+    //    padding: crypto.constants.RSA_PKCS1_PADDING,
+    //})
+    let signer = crypto.createSign("RSA-SHA256")
+    signer.update(signedString)
+    signer.end()
+    let signature = signer.sign(key)
+    let signatureBase64 = signature.toString("base64")
+    let header = `keyId="https://${domain}/actor#main-key",algorithm="rsa-sha256",headers="(request-target) host date digest",signature="${signatureBase64}"`
+    req.setHeader("Date", date)
+    req.setHeader("Digest", digest)
+    req.setHeader("Signature", header)
     req.write(JSON.stringify(payload))
-    console.log(req)
+    console.log(req.getHeaders())
     req.end()
 }
 
 app.listen(port, () => {
     console.log(`Listening on port ${port}`)
+    //sendSigned(`https://${domain}/inbox`, {type: "Hello"})
 })
 
 // Wat. Via https://stackoverflow.com/questions/65306617/async-await-for-node-js-https-get
